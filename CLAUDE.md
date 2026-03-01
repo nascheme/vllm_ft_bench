@@ -18,6 +18,27 @@ src/vllm_ft/      Shared utility package
 pyproject.toml    Hatch build (package: vllm_ft)
 ```
 
+## vLLM source
+
+The vllm source tree is at **`/home/nas/pkg/vllm/vllm/`**.  Always read
+files from this path when you need to inspect vllm internals — do not search
+`site-packages`, `.venv`, or other locations.
+
+### Async output pipeline (key classes)
+
+The async output path is non-obvious.  When monkey-patching `get_output()`,
+target the **concrete** class, not the abstract base:
+
+| Class | File | Role |
+|---|---|---|
+| `AsyncModelRunnerOutput` | `v1/outputs.py` | ABC, defines `get_output()` interface |
+| `AsyncGPUModelRunnerOutput` | `v1/worker/gpu_model_runner.py` | **Concrete class used at runtime.** Has `sampled_token_ids_cpu` (torch.Tensor), `async_copy_ready_event` (torch.Event), `_model_runner_output`, `_invalid_req_indices`, `_logprobs_tensors_cpu` |
+| ~~`AsyncOutput`~~ | ~~`v1/worker/gpu/async_utils.py`~~ | Legacy/unused in current vllm — do NOT patch this class |
+
+The executor submits `result.get_output` (a bound method on
+`AsyncGPUModelRunnerOutput`) to the async output thread pool via
+`UniProcExecutor.collective_rpc()` (`v1/executor/uniproc_executor.py`).
+
 ## Development hints
 
 You cannot assume the local PC has `torch` or `vllm` installed. These are only

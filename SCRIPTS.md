@@ -95,6 +95,16 @@ Monkey-patches vLLM internals to time individual sub-components of
 single-GPU then dual-GPU in the same process to pinpoint where threading
 overhead accumulates.
 
+**`threaded_gap_breakdown.py`**
+Extends `threaded_step_breakdown.py` by decomposing the "other (gap)" residual
+into labelled sub-components.  Adds timing for `get_grammar_bitmask`,
+`sample_tokens` (the main suspect for the ~15ms gap), and its internal
+sub-calls `_sample` and `_bookkeeping_sync` (which contains the real CUDA sync
+via `transfer_event.synchronize()`).  Also records per-step batch size to test
+the hypothesis that the gap is O(batch) due to `_bookkeeping_sync`'s Python
+loop over in-flight requests.  Outputs a gap attribution table showing what
+fraction of the old "other (gap)" is now accounted for by each new component.
+
 **`threaded_profile_generate.py`**
 Runs single-GPU then dual-GPU threaded phases in subprocesses (for clean GPU
 memory), measuring GPU time via CUDA events vs wall time per step.
@@ -111,6 +121,17 @@ engines together vs each solo.
 **`threaded_pipelined_generate.py`**
 Explores a pipelined output-processing architecture; times output
 post-processing separately from the GPU step.
+
+**`trace_tolist_patch.py`**
+Instruments `AsyncGPUModelRunnerOutput.get_output()` to diagnose the async
+output pipeline bottleneck.  Two modes: diagnostic (default) logs tensor
+shapes (`sampled_token_ids_cpu`), copy-stream sync time, and `.tolist()`
+time per step; `--patch-tolist` replaces `get_output()` with a per-row
+slicing version (useful if spec-decode produces wide tensors, but a no-op
+for the common `(batch, 1)` shape).  Use `--steps N` to control how many
+steps are traced.  Corrected a measurement error in `trace_step_flow.py`
+that had misattributed copy-stream sync time to `.tolist()` — see
+GAP_MEASURE.md Phase 4.
 
 ---
 
@@ -139,6 +160,35 @@ with CUDA ops to isolate Python object manipulation as a contention source.
 **`cudagraph_test.py`**
 Tests CUDA graph capture with `enforce_eager=True` on free-threaded Python
 3.14t, then benchmarks single vs. threaded to confirm driver-call reduction.
+
+**`cuda_pipeline_bench.py`**
+Pure PyTorch (no vLLM) pipeline benchmark simulating the async-copy-stream
+pattern. Four phases:
+
+- **Phase A**: Kernel launch overhead (threaded vs subprocess vs single)
+- **Phase B**: Pipeline throughput (sync vs async copy, 1 vs 2 copy streams)
+- **Phase C**: Same-GPU multi-thread contention (shared vs dedicated streams)
+- **Phase D**: Saturation sweep & sub-batch splitting
+  - **D1**: Compute intensity vs multi-stream gain — sweeps `num_layers` with
+    4 threads to find where multi-stream gains disappear as GPU saturates
+  - **D2**: Fixed-work sub-batch splitting — splits `--total-batch-size`
+    (default 128) across 1/2/4/8 streams sharing weights, measures effective
+    throughput
+  - **D3**: Per-step latency distribution — reports per-sub-batch step latency
+    percentiles (p50/p95/p99) and wall-step latency (max across threads)
+
+Key CLI flags: `--phase {A,B,C,D,D1,D2,D3,all}`, `--hidden-size`,
+`--num-layers`, `--batch-size`, `--vocab-size`, `--num-steps`,
+`--warmup-steps`, `--max-threads-per-gpu`, `--total-batch-size`.
+
+**`stream_diagnostic.py`**
+Verifies that each vLLM engine thread gets its own dedicated CUDA stream.
+Creates two `LLMEngine` instances (sequentially on main thread), then steps
+them on separate threads while logging `torch.cuda.current_stream()` and
+vLLM's `current_stream()` identity (stream ID + pointer) before, during, and
+after stepping. Confirmed that vLLM's `threading.local()`-based stream
+management in `torch_utils.py` gives each thread a unique stream with no
+monkey-patching needed.
 
 ---
 
