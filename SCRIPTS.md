@@ -29,6 +29,15 @@ Same as `mp_generate.py` but with static round-robin request partitioning
 (pre-split before any process starts). Removes load-balancing as a variable
 when comparing threaded vs. process isolation.
 
+**`mp_engine_generate.py`**
+Like `mp_static_generate.py` but uses `create_engine()` + a manual preload
+step loop instead of `LLM.generate()`, and sets
+`VLLM_ENABLE_V1_MULTIPROCESSING=0`. Supports `--cuda-graphs`. This makes it
+the apples-to-apples multi-process baseline for the threaded scripts, which
+use the same methodology. Comparing threaded results against this script
+(rather than `mp_static_generate.py`) isolates threading overhead from the
+`LLM.generate()` / `VLLM_ENABLE_V1_MULTIPROCESSING` difference.
+
 ---
 
 ## Core Threaded Inference Scripts
