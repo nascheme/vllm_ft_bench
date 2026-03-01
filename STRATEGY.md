@@ -28,8 +28,13 @@ of smaller, focused improvements is more likely to land and matter in practice.
 
 ## Current Status
 
-On 2x RTX 2060, threaded + CUDA graphs achieves ~95% of multi-process
-throughput. The remaining ~5% gap is under investigation (see `PERFORMANCE.md`).
+On 2x RTX 2060, threaded + CUDA graphs achieves parity with the equivalent
+multi-process configuration (`mp_engine_generate.py`, same step-loop
+methodology). Threading itself contributes ≤2% overhead. The remaining ~3%
+gap to `mp_static_generate.py` (`LLM.generate()` + `VLLM_ENABLE_V1_MULTIPROCESSING=1`)
+is not from threading — it reflects that the EngineCore event loop runs faster
+in a dedicated subprocess than sharing a process with the step loop. See
+`PERFORMANCE.md` for details.
 The short-term goal is to close that gap and understand the remaining
 bottlenecks well enough to address them.
 
@@ -117,12 +122,12 @@ decisions, and a bigger payoff from zero-IPC observability.
 
 ## What to Try Next
 
-**Closing the ~5% gap:**
-- Profile with `samply` to identify what the remaining overhead is
-- Investigate `queue.Queue` mutex as a contention point (replace with
-  lock-free or per-engine pre-partitioned structures)
-- Check biased reference counting overhead (shared objects touched by both
-  engine threads)
+**Closing the ~3% gap to `mp_static`:**
+- Investigate why `VLLM_ENABLE_V1_MULTIPROCESSING=1` is ~10% faster than
+  `=0` even in separate processes — likely the EngineCore event loop getting
+  a dedicated subprocess; resolve thread-safety issues to try `=1` in-process
+- Profile `other (gap)` in the step-time breakdown to confirm it's the
+  in-process event-loop round-trip, not some other serialization point
 
 **Targeted IPC / latency patches:**
 - Identify serial deserialization bottlenecks (depickling engine responses) and

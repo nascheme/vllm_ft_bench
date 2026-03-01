@@ -31,9 +31,11 @@ free-threaded Python releases the GIL, threads can run Python code in parallel
 on multiple CPU cores, unlike standard Python threads.
 
 The intermediate target: **parity with multi-process DP** for offline batch
-inference. Currently threaded + CUDA graphs achieves ~95% of multi-process
-throughput. The remaining gap and its causes are the active area of
-investigation.
+inference. Threaded + CUDA graphs now achieves parity with the equivalent
+multi-process configuration (`mp_engine_generate.py`, same step-loop
+methodology). The remaining ~3% gap to `mp_static_generate.py` (`LLM.generate()`
+with `VLLM_ENABLE_V1_MULTIPROCESSING=1`) is under investigation and is not
+caused by threading itself.
 
 ## Quick Start
 
@@ -50,8 +52,8 @@ python scripts/mp_generate.py
 # Threaded dual-engine (2 GPUs, one process)
 python scripts/threaded_static_generate.py --preload
 
-# Threaded + CUDA graphs (closest to parity)
-python scripts/threaded_static_generate.py --preload --cuda-graphs
+# Threaded + CUDA graphs (parity with equivalent multi-process)
+python scripts/threaded_pipelined_generate.py --cuda-graphs
 ```
 
 Common flags (all scripts):

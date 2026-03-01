@@ -12,29 +12,52 @@ multi-process baseline.
 
 ## Headline Numbers
 
-| Configuration | Throughput | Per-GPU | vs. Multi-process |
-|---|---|---|---|
-| Single GPU (baseline) | ~11 req/s | 11 req/s | — |
-| Multi-process (2 GPU, separate processes) | ~24 req/s | ~12 req/s | 1.0× (baseline) |
-| Threaded (2 GPU, same process) | ~16 req/s | ~8 req/s | 0.67× |
-| **Threaded + CUDA graphs** | **~23 req/s** | **~11.5 req/s** | **~0.95×** |
+Two multi-process baselines are needed for a fair comparison.
+`mp_static_generate.py` uses `LLM.generate()` with `VLLM_ENABLE_V1_MULTIPROCESSING=1`
+(EngineCore in a dedicated child subprocess) and represents the practical
+performance ceiling. `mp_engine_generate.py` uses the same `create_engine()` +
+manual step loop + `VLLM_ENABLE_V1_MULTIPROCESSING=0` as the threaded scripts,
+but in separate processes — the apples-to-apples baseline for threading overhead.
 
-The threaded + CUDA graphs configuration achieves approximately **95% of
-multi-process throughput** in a single process.
+| Configuration | Script | Throughput | vs. mp_static | vs. mp_engine |
+|---|---|---|---|---|
+| Single GPU | simple_generate.py | ~11.7 req/s | — | — |
+| **mp_static** (LLM.generate, V1_MP=1) | mp_static_generate.py | 23.54 req/s | 1.00× | — |
+| mp_engine, no CUDA graphs (step loop, V1_MP=0) | mp_engine_generate.py | 21.29 req/s | 0.91× | 1.00× |
+| mp_engine + CUDA graphs | mp_engine_generate.py --cuda-graphs | 22.72 req/s | 0.97× | 1.07× |
+| **Threaded, no CUDA graphs** (step loop, V1_MP=0) | threaded_static_generate.py --preload | 20.82 req/s | 0.88× | **0.98×** |
+| **Threaded + CUDA graphs** | threaded_pipelined_generate.py --cuda-graphs | 22.79 req/s | 0.97× | **1.00×** |
+
+Threaded + CUDA graphs achieves **parity with the equivalent multi-process
+configuration** (`mp_engine_generate.py`). The remaining ~3% gap to `mp_static`
+is not from threading — it exists identically between `mp_static` and
+`mp_engine` (both in separate processes) and is attributable to `LLM.generate()`
+internals and `VLLM_ENABLE_V1_MULTIPROCESSING=1`. See Open Questions.
 
 ### Step-time breakdown (p50, steady-state decode)
 
+Results from `threaded_step_breakdown.py`. Three columns show the asymmetry
+between the two engine threads: cuda:0 draws larger batches (p50 batch≈20),
+cuda:1 draws smaller ones (p50 batch≈7).
+
 ```
-Component             Single    Threaded   Ratio
-schedule               0.19ms    0.29ms    1.5×   (trivial)
-execute_model         14.07ms   32.56ms    2.3×   ← bulk of overhead
-update_from_output     0.12ms    0.19ms    1.6×   (trivial)
-process_outputs        0.14ms    0.22ms    1.6×   (trivial)
-total step            22.71ms   34.65ms    1.5×
+Component           Single GPU   Threaded     Threaded     Ratio (single
+                    (alone)      cuda:0       cuda:1       vs. t-cuda:0)
+schedule              0.18ms       0.30ms       0.10ms       1.70×
+execute_model        13.93ms      17.02ms      15.92ms       1.22×
+update_from_output    0.12ms       0.23ms       0.08ms       1.83×
+process_outputs       0.14ms      0.23ms        0.07ms       1.59×
+other (gap)           7.68ms      14.99ms       0.39ms       1.95×  ←
+total step           22.74ms      31.57ms      17.81ms       1.39×
 ```
 
-The `execute_model` slowdown dominates. The CPU-only phases (scheduling,
-output processing) show only modest scaling costs.
+The `execute_model` overhead is modest (1.22×). The dominant new cost is
+`other (gap)` — the unmeasured time between the four named components,
+representing vLLM's internal async event-loop round-trips. It nearly doubles
+for cuda:0 (+7.32ms) but is essentially unchanged for cuda:1 (0.39ms). This
+asymmetry tracks batch size: larger batches produce more Python work per step,
+extending the event-loop round-trip. The net throughput impact is small (~2%)
+because cuda:1 drives wall time and cuda:1 is not penalized.
 
 ---
 
@@ -63,9 +86,17 @@ this, but the per-engine slowdown remains.
 `create_engine()` + manual `engine.step()` loop produces identical single-GPU
 throughput to `LLM.generate()` (~11 req/s). The step loop itself adds no cost.
 
-### Multiprocess mode within the engine
+### Multiprocess mode within the engine (single-GPU)
 `VLLM_ENABLE_V1_MULTIPROCESSING=0` (in-process EngineCore) vs. default
-multiprocess mode gives the same single-GPU throughput.
+multiprocess mode gives the same single-GPU throughput. However, a ~10%
+dual-GPU gap persists between `mp_static_generate.py` (23.54 req/s, V1_MP=1)
+and `mp_engine_generate.py` (21.29 req/s, V1_MP=0) even though both run in
+separate processes with no threading involved. The cause is almost certainly
+`VLLM_ENABLE_V1_MULTIPROCESSING=1`: when the EngineCore runs in a dedicated
+child subprocess, its asyncio event loop gets its own CPU and is never
+preempted by the step-loop caller. With `=0`, the event loop shares the
+process with the step loop, slowing the internal round-trips visible as
+`other (gap)` in the step-time table. See Open Questions.
 
 ### GIL vs. free-threaded Python (for engine threads)
 Testing with both standard (GIL) and free-threaded (`--disable-gil`) builds
@@ -73,76 +104,86 @@ produced essentially identical throughput. PyTorch already releases the GIL
 during CUDA kernel launches, so the GPU-bound workload sees no benefit from
 GIL removal in the engine threads themselves.
 
+### Threading itself
+When compared apples-to-apples against `mp_engine_generate.py` (same step-loop
+architecture, same `VLLM_ENABLE_V1_MULTIPROCESSING=0`, but separate OS
+processes), threading adds ≤2% overhead without CUDA graphs and is
+indistinguishable from zero with CUDA graphs. Earlier analysis overstated the
+threading penalty because it compared the threaded step-loop against
+`mp_static_generate.py`, which uses a different methodology on two axes
+simultaneously (`LLM.generate()` and `VLLM_ENABLE_V1_MULTIPROCESSING=1`).
+
 ---
 
-## The CUDA Graph Mitigation
+## CUDA Graphs
 
-The primary `execute_model` overhead comes from **CUDA driver API call
-contention**. Each vLLM step launches hundreds of CUDA kernels (attention,
-linear layers, norms, sampling). These launches go through the CUDA driver,
-which serializes across threads within a process via a per-process mutex.
+CUDA graphs provide a consistent ~7% throughput improvement in both threaded
+and multi-process configurations:
 
-**CUDA graphs** collapse many kernel launches into a single `cudaGraphLaunch`
-call. This dramatically reduces driver API traffic and the associated mutex
-contention.
+```
+mp_engine, no CUDA graphs:  21.29 req/s
+mp_engine + CUDA graphs:    22.72 req/s  (+6.7%)
+
+Threaded, no CUDA graphs:   20.82 req/s
+Threaded + CUDA graphs:     22.79 req/s  (+9.5%)
+```
+
+The benefit is symmetric — CUDA graphs are not a threading-specific fix.
+They reduce step-time variance by collapsing per-step kernel launches into a
+single `cudaGraphLaunch`, which cuts the high-end tail (p90/p99 step times)
+and lets the two engines finish more closely in time. Since wall time is
+determined by the slower engine, tightening the tail improves throughput even
+when mean step time barely changes.
 
 Enabling CUDA graphs in `create_engine(cuda_graphs=True)` uses `FULL` mode
 (captures the entire forward pass as a single graph), which works without
 `torch.compile`. The `enforce_eager=True` flag still suppresses triton/compile;
 only CUDA graph capture mode is changed.
 
-```
-Without CUDA graphs:  ~16 req/s  (0.67× multi-process)
-With CUDA graphs:     ~23 req/s  (0.95× multi-process)
-```
+Note: CUDA graphs are benchmarked via `threaded_pipelined_generate.py
+--cuda-graphs` (which pipelines output processing separately from the GPU
+step) rather than `threaded_static_generate.py`, which does not have a
+`--cuda-graphs` flag.
 
 ---
 
 ## Open Questions
 
-The CUDA graph result shows the driver-lock hypothesis captures most of the
-overhead, but the story isn't complete. Approximately 5% gap remains, and there
-are reasons to believe additional contention sources are active.
+Threading overhead is now established as negligible (≤2% vs. equivalent
+multi-process). The open questions focus on what accounts for the ~10% gap
+between `mp_static` and the `create_engine` step-loop approach, and on
+longer-term architecture.
 
-### 1. `queue.Queue` mutex contention
+### 1. Why is `LLM.generate()` + `VLLM_ENABLE_V1_MULTIPROCESSING=1` ~10% faster?
 
-`queue.Queue` uses a `threading.Lock` (or `threading.Condition`) internally.
-In free-threaded Python, this is a real OS-level mutex, not protected by the
-GIL. Multiple engine threads and dispatcher threads contending on the same
-queue may cause measurable overhead — especially at high step rates where queue
-operations are frequent relative to GPU step time.
+`mp_static_generate.py` (23.54 req/s) vs. `mp_engine_generate.py` (21.29 req/s)
+both run in separate processes with no threading, but differ in methodology:
+`LLM.generate()` vs. `create_engine()` + step loop, and `V1_MP=1` vs. `=0`.
 
-**How to investigate:** Replace shared `queue.Queue` with lock-free alternatives
-(e.g., per-engine pre-partitioned queues with no sharing at step time) and
-measure whether throughput changes.
+Most likely cause: with `V1_MP=1`, the EngineCore asyncio event loop runs in
+a dedicated child subprocess and is never preempted by the calling process.
+With `V1_MP=0`, the event loop shares the process with the step loop, producing
+the `other (gap)` overhead visible in the step-time breakdown — 7.68ms per step
+even in single-GPU mode. With `V1_MP=1` this gap would likely shrink or
+disappear, recovering most of the 10% difference.
+
+**How to investigate:** Profile with `V1_MP=1` inside a threaded context once
+the thread-safety issues are resolved; measure whether `other (gap)` drops.
+Alternatively, run `threaded_step_breakdown.py` in a subprocess to isolate
+whether the gap is an in-process effect.
 
 ### 2. Biased reference counting in free-threaded Python
 
 Free-threaded Python 3.14t uses *biased reference counting*: objects are
 assumed to be owned by one thread. When a thread other than the "owner" touches
 an object's refcount, it requires atomic operations and can cause cache-line
-contention. vLLM's step loop creates and destroys many Python objects per step
-(request dicts, output lists, sampling results, scheduler state). Two engine
-threads doing this simultaneously — especially if they share objects like the
-tokenizer or config — may incur atomic refcount overhead.
+contention. With threading overhead at ~2% overall this is likely a second-order
+effect, but it may account for part of that residual.
 
-This is distinct from the CUDA driver lock: it affects all Python code, not
-just CUDA API calls, and would not be visible in pure-PyTorch contention
-benchmarks (which have minimal Python object churn per iteration).
+**How to investigate:** Profile with `perf record` looking for cache-miss
+hotspots in refcount operations.
 
-### 3. Other vLLM global state
-
-Beyond the four known workarounds (see `SCRIPTS.md`), other module-level or
-class-level state in vLLM may serialize between threads:
-- Logging and metrics infrastructure
-- Output processor state (detokenizer, incremental decode buffers)
-- Attention backend workspace buffers (lazily allocated global singletons in
-  some backends)
-
-**How to investigate:** Instrument vLLM internals at finer granularity;
-profile lock wait time with `py-spy` or `perf record`.
-
-### 4. CPU cache thrashing
+### 3. CPU cache thrashing
 
 Two engine threads on different CPU cores competing for L3 cache. Each engine's
 working set (scheduler state, KV cache metadata, Python interpreter state)
@@ -151,7 +192,7 @@ evicts the other's data, causing higher cache miss rates.
 **How to investigate:** Pin engine threads to specific CPU cores/NUMA nodes
 with `os.sched_setaffinity()` and compare.
 
-### 5. PyTorch allocator and internal state
+### 4. PyTorch allocator and internal state
 
 PyTorch's CUDA caching allocator is per-device but process-wide. Internal
 PyTorch state (autograd bookkeeping, cuDNN handle management) may also have
