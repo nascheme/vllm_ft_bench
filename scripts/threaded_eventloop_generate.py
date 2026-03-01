@@ -117,19 +117,15 @@ def engine_worker(engine, device_index, request_items, result, barrier):
 
     torch.cuda.set_device(device_index)
 
-    input_processor = engine.input_processor
+    from vllm_ft.util import render_request
+
     output_processor = engine.output_processor
 
     # --- Phase 1: add all requests ---
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"gpu{device_index}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"gpu{device_index}_{i}", proc_input, sp)
 
     # Grab the raw EngineCore (InprocClient wraps it).
     raw_core = engine.engine_core.engine_core

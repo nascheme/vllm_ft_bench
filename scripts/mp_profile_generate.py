@@ -69,6 +69,7 @@ def run_subprocess_profiled(device_index, model, num_requests, num_gpus, result_
         apply_forward_context_monkey_patch,
         build_request_items,
         create_engine,
+        render_request,
     )
 
     apply_forward_context_monkey_patch()
@@ -99,16 +100,10 @@ def run_subprocess_profiled(device_index, model, num_requests, num_gpus, result_
     # device_index=0 because CUDA_VISIBLE_DEVICES remaps to cuda:0.
     engine = create_engine(engine_args, 0, UsageContext.LLM_CLASS)
 
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(my_items):
-        ecr = input_processor.process_inputs(
-            f"gpu{device_index}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"gpu{device_index}_{i}", proc_input, sp)
 
     t0 = time.time()
     outputs, wall_times, gpu_times, batch_sizes = engine_generate_profiled(engine, 0)

@@ -42,6 +42,7 @@ from vllm_ft.util import (
     make_arg_parser,
     print_prompt_length_histogram,
     print_throughput_results,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -112,19 +113,11 @@ DISPATCH_QUEUE_HIGH_WATER = 16  # Back off when an engine queue exceeds this.
 DISPATCH_BACKPRESSURE_SLEEP = 0.1  # Seconds to sleep when back-pressure fires.
 
 
-def smart_dispatcher_worker(
-    input_processor, supported_tasks, request_items, request_queues, engines
-):
+def smart_dispatcher_worker(renderer, request_items, request_queues, engines):
     """Routes requests: round-robin when idle, lowest-KV-usage when busy."""
     rr_idx = 0
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            str(i),
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=supported_tasks,
-        )
+        proc_input = render_request(renderer, req.prompt)
 
         while True:
             stats = [get_engine_stats(e) for e in engines]
@@ -162,7 +155,7 @@ def smart_dispatcher_worker(
                     request_queues[target_idx].qsize(),
                     usages[target_idx],
                 )
-                request_queues[target_idx].put((ecr, req.prompt, sp))
+                request_queues[target_idx].put((str(i), proc_input, sp))
                 break
 
     # Signal each engine worker to shut down.
@@ -193,8 +186,8 @@ def engine_worker(engine, device_index, my_queue, stats):
             if item is None:
                 done = True
                 break
-            ecr, prompt_text, sp = item
-            engine.add_request(ecr.request_id, ecr, sp, prompt_text=prompt_text)
+            req_id, proc_input, sp = item
+            engine.add_request(req_id, proc_input, sp)
             # After the first item, always non-blocking for the rest.
             get = my_queue.get_nowait
 
@@ -250,8 +243,7 @@ def main():
     dispatch_thread = threading.Thread(
         target=smart_dispatcher_worker,
         args=(
-            engines[0].input_processor,
-            engines[0].get_supported_tasks(),
+            engines[0].renderer,
             request_items,
             request_queues,
             engines,

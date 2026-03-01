@@ -29,6 +29,7 @@ from vllm_ft.util import (
     create_engine,
     make_arg_parser,
     print_throughput_results,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -85,23 +86,16 @@ class StepTimings:
 
 
 def tokenizer_worker(
-    input_processor,
-    supported_tasks,
+    renderer,
     request_items,
     per_engine_queues,
     done_event,
 ):
     num_engines = len(per_engine_queues)
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            str(i),
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=supported_tasks,
-        )
+        proc_input = render_request(renderer, req.prompt)
         target = i % num_engines
-        per_engine_queues[target].put((ecr, req.prompt, sp))
+        per_engine_queues[target].put((str(i), proc_input, sp))
     done_event.set()
 
 
@@ -123,13 +117,8 @@ def engine_worker(
     while True:
         for _ in range(MAX_PULL_PER_STEP):
             try:
-                ecr, prompt_text, sp = my_queue.get_nowait()
-                engine.add_request(
-                    ecr.request_id,
-                    ecr,
-                    sp,
-                    prompt_text=prompt_text,
-                )
+                req_id, proc_input, sp = my_queue.get_nowait()
+                engine.add_request(req_id, proc_input, sp)
             except queue.Empty:
                 break
 
@@ -154,13 +143,8 @@ def engine_worker(
             break
         else:
             try:
-                ecr, prompt_text, sp = my_queue.get(timeout=0.5)
-                engine.add_request(
-                    ecr.request_id,
-                    ecr,
-                    sp,
-                    prompt_text=prompt_text,
-                )
+                req_id, proc_input, sp = my_queue.get(timeout=0.5)
+                engine.add_request(req_id, proc_input, sp)
             except queue.Empty:
                 if tok_done.is_set():
                     break
@@ -211,23 +195,11 @@ def main():
         # Tokenize all requests and add them directly to engines before
         # starting the step loop.  This matches LLM.generate() behavior.
         print("Preloading: tokenizing and adding all requests to engines ...")
-        input_processor = engines[0].input_processor
-        supported_tasks = engines[0].get_supported_tasks()
+        renderer = engines[0].renderer
         for i, (req, sp) in enumerate(request_items):
-            ecr = input_processor.process_inputs(
-                str(i),
-                req.prompt,
-                sp,
-                arrival_time=time.time(),
-                supported_tasks=supported_tasks,
-            )
+            proc_input = render_request(renderer, req.prompt)
             target = i % args.num_gpus
-            engines[target].add_request(
-                ecr.request_id,
-                ecr,
-                sp,
-                prompt_text=req.prompt,
-            )
+            engines[target].add_request(str(i), proc_input, sp)
         tok_done.set()
         print(
             f"Preloaded {num_requests} requests "
@@ -237,8 +209,7 @@ def main():
         tok_thread = threading.Thread(
             target=tokenizer_worker,
             args=(
-                engines[0].input_processor,
-                engines[0].get_supported_tasks(),
+                engines[0].renderer,
                 request_items,
                 per_engine_queues,
                 tok_done,

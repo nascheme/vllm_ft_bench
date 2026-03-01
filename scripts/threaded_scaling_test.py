@@ -17,7 +17,6 @@ import threading
 import time
 
 import torch
-
 from vllm import EngineArgs
 from vllm.tokenizers import get_tokenizer
 from vllm.usage.usage_lib import UsageContext
@@ -27,6 +26,7 @@ from vllm_ft.util import (
     build_request_items,
     create_engine,
     make_arg_parser,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -48,16 +48,10 @@ def engine_generate(engine, device_index):
 def load_and_run(engine, device_index, request_items):
     """Load requests into engine and run."""
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"gpu{device_index}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"gpu{device_index}_{i}", proc_input, sp)
 
     t0 = time.time()
     outputs, steps = engine_generate(engine, device_index)
@@ -76,16 +70,10 @@ def load_and_run(engine, device_index, request_items):
 
 def threaded_worker(engine, device_index, request_items, result, barrier):
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"gpu{device_index}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"gpu{device_index}_{i}", proc_input, sp)
 
     barrier.wait()
 

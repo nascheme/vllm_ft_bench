@@ -28,14 +28,13 @@ import torch
 from vllm import EngineArgs, SamplingParams
 from vllm.tokenizers import get_tokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreRequest
-
 from vllm_ft.util import (
     apply_forward_context_monkey_patch,
     build_request_items,
     create_engine,
     make_arg_parser,
     print_throughput_results,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -59,7 +58,7 @@ class InferenceTask:
     sampling_params: SamplingParams
     future: concurrent.futures.Future
     created_at: float
-    ecr: EngineCoreRequest | None = None
+    proc_input: object = None
     engine_index: int = -1
 
 
@@ -121,8 +120,7 @@ class Dispatcher:
             self.engines.append(create_engine(engine_args, i, UsageContext.LLM_CLASS))
         print(f"All {num_gpus} engines created.")
 
-        self.input_processor = self.engines[0].input_processor
-        self.supported_tasks = self.engines[0].get_supported_tasks()
+        self.renderer = self.engines[0].renderer
 
         # Per-engine queues and stats.
         self.engine_queues: list[queue.Queue] = [queue.Queue() for _ in range(num_gpus)]
@@ -213,14 +211,7 @@ class Dispatcher:
                 break
 
             try:
-                ecr = self.input_processor.process_inputs(
-                    task.task_id,
-                    task.prompt,
-                    task.sampling_params,
-                    arrival_time=task.created_at,
-                    supported_tasks=self.supported_tasks,
-                )
-                task.ecr = ecr
+                task.proc_input = render_request(self.renderer, task.prompt)
 
                 # Route to least-loaded engine.
                 idx = self._route()
@@ -255,10 +246,9 @@ class Dispatcher:
                 pulled += 1
                 pending[task.task_id] = task
                 engine.add_request(
-                    task.ecr.request_id,
-                    task.ecr,
+                    task.task_id,
+                    task.proc_input,
                     task.sampling_params,
-                    prompt_text=task.prompt,
                 )
 
             if engine.has_unfinished_requests():
@@ -289,10 +279,9 @@ class Dispatcher:
                         continue
                     pending[task.task_id] = task
                     engine.add_request(
-                        task.ecr.request_id,
-                        task.ecr,
+                        task.task_id,
+                        task.proc_input,
                         task.sampling_params,
-                        prompt_text=task.prompt,
                     )
                 except queue.Empty:
                     if self._shutdown.is_set() and not pending:

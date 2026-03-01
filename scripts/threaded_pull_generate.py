@@ -43,6 +43,7 @@ from vllm_ft.util import (
     make_arg_parser,
     print_prompt_length_histogram,
     print_throughput_results,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -107,19 +108,11 @@ def status_reporter_worker(engines, engine_stats, num_requests, stop_event, star
     sys.stdout.write("\n")
 
 
-def tokenizer_worker(
-    input_processor, supported_tasks, request_items, shared_queue, done_event
-):
+def tokenizer_worker(renderer, request_items, shared_queue, done_event):
     """Pre-tokenize all requests into the shared queue."""
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            str(i),
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=supported_tasks,
-        )
-        shared_queue.put((ecr, req.prompt, sp))
+        proc_input = render_request(renderer, req.prompt)
+        shared_queue.put((str(i), proc_input, sp))
     done_event.set()
 
 
@@ -170,8 +163,8 @@ def engine_worker(engine, device_index, shared_queue, tok_done, stats):
                     # but handle gracefully.
                     break
 
-                ecr, prompt_text, sp = item
-                engine.add_request(ecr.request_id, ecr, sp, prompt_text=prompt_text)
+                req_id, proc_input, sp = item
+                engine.add_request(req_id, proc_input, sp)
                 in_flight += 1
                 pulled += 1
 
@@ -221,8 +214,7 @@ def main():
     tok_thread = threading.Thread(
         target=tokenizer_worker,
         args=(
-            engines[0].input_processor,
-            engines[0].get_supported_tasks(),
+            engines[0].renderer,
             request_items,
             shared_queue,
             tok_done,

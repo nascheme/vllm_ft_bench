@@ -22,6 +22,7 @@ from vllm_ft.util import (
     build_request_items,
     create_engine,
     make_arg_parser,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -37,8 +38,10 @@ def run_engine_mode(args, request_items):
     engine = create_engine(engine_args, 0, UsageContext.LLM_CLASS)
 
     # Add all requests up front (same as LLM.generate).
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        engine.add_request(str(i), req.prompt, sp)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(str(i), proc_input, sp)
 
     # Step loop — matches LLM._run_engine() exactly.
     completed = 0

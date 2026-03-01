@@ -5,6 +5,7 @@ can set CUDA_VISIBLE_DEVICES before vllm is imported.
 """
 
 import argparse
+import logging
 import os
 import sys
 import threading
@@ -86,6 +87,17 @@ def make_arg_parser(
 
 
 # ---------------------------------------------------------------------------
+# Renderer helper
+# ---------------------------------------------------------------------------
+
+
+def render_request(renderer, prompt_text):
+    """Render a prompt string into ProcessorInputs via the Renderer API."""
+    results = renderer.render_cmpl([{"prompt": prompt_text}])
+    return results[0]
+
+
+# ---------------------------------------------------------------------------
 # Dataset / request building
 # ---------------------------------------------------------------------------
 
@@ -140,10 +152,15 @@ def build_request_items(args, tokenizer):
             f"({args.num_requests} requests) ..."
         )
         dataset = ShareGPTDataset(dataset_path=dataset_path, random_seed=42)
+        # Suppress "Token indices sequence length is longer than ..." warning.
+        _hf_logger = logging.getLogger("transformers.tokenization_utils_base")
+        _hf_prev = _hf_logger.level
+        _hf_logger.setLevel(logging.ERROR)
         requests = dataset.sample(
             tokenizer=tokenizer,
             num_requests=args.num_requests,
         )
+        _hf_logger.setLevel(_hf_prev)
         request_items = [
             (
                 req,
@@ -294,7 +311,12 @@ def create_engine(
 
     _ROPE_DICT.clear()
 
+    # Suppress "The model's max seq len ... is larger than ..." seed warning.
+    _seed_logger = logging.getLogger("vllm.engine.arg_utils")
+    _seed_prev = _seed_logger.level
+    _seed_logger.setLevel(logging.ERROR)
     vllm_config = engine_args.create_engine_config(usage_context)
+    _seed_logger.setLevel(_seed_prev)
     vllm_config.device_config.device = torch.device(f"cuda:{device_index}")
 
     # Re-enable CUDA graphs after enforce_eager disabled them.

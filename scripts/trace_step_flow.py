@@ -29,6 +29,7 @@ from vllm_ft.util import (
     build_request_items,
     create_engine,
     make_arg_parser,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -239,16 +240,10 @@ def install_trace_hooks(engine):
 
 def run_traced(engine, device_index, request_items, prefix, max_steps):
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"{prefix}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"{prefix}_{i}", proc_input, sp)
 
     step_num = 0
     finished = {}
@@ -282,16 +277,10 @@ def threaded_worker(
     engine, device_index, request_items, prefix, result_dict, barrier, max_steps
 ):
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"{prefix}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"{prefix}_{i}", proc_input, sp)
 
     barrier.wait()
 

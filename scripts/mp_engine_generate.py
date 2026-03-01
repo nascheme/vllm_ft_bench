@@ -45,7 +45,7 @@ def engine_worker(
     from vllm.tokenizers import get_tokenizer
     from vllm.usage.usage_lib import UsageContext
 
-    from vllm_ft.util import build_request_items, create_engine
+    from vllm_ft.util import build_request_items, create_engine, render_request
 
     # Build dataset independently in each worker (same as mp_static_generate.py).
     tokenizer = get_tokenizer(model)
@@ -81,17 +81,10 @@ def engine_worker(
 
     # Preload: tokenize and add all requests before stepping (matches
     # LLM.generate() / threaded_static_generate.py --preload behaviour).
-    input_processor = engine.input_processor
-    supported_tasks = engine.get_supported_tasks()
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(my_request_items):
-        ecr = input_processor.process_inputs(
-            str(i),
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=supported_tasks,
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(str(i), proc_input, sp)
 
     # Step loop.
     completed = 0

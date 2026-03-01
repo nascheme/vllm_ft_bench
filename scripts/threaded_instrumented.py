@@ -31,6 +31,7 @@ from vllm_ft.util import (
     create_engine,
     make_arg_parser,
     print_throughput_results,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -178,18 +179,10 @@ def instrument_engine_core(engine, timings):
         executor.sample_tokens = timed_sample
 
 
-def tokenizer_worker(
-    input_processor, supported_tasks, request_items, tokenized_queue, done_event
-):
+def tokenizer_worker(renderer, request_items, tokenized_queue, done_event):
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            str(i),
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=supported_tasks,
-        )
-        tokenized_queue.put((ecr, req.prompt, sp))
+        proc_input = render_request(renderer, req.prompt)
+        tokenized_queue.put((str(i), proc_input, sp))
     done_event.set()
 
 
@@ -213,13 +206,8 @@ def engine_worker(
         t0 = time.perf_counter_ns()
         for _ in range(MAX_PULL_PER_STEP):
             try:
-                ecr, prompt_text, sp = tokenized_queue.get_nowait()
-                engine.add_request(
-                    ecr.request_id,
-                    ecr,
-                    sp,
-                    prompt_text=prompt_text,
-                )
+                req_id, proc_input, sp = tokenized_queue.get_nowait()
+                engine.add_request(req_id, proc_input, sp)
             except queue.Empty:
                 break
         timings.pull_ns += time.perf_counter_ns() - t0
@@ -266,13 +254,8 @@ def engine_worker(
             break
         else:
             try:
-                ecr, prompt_text, sp = tokenized_queue.get(timeout=0.5)
-                engine.add_request(
-                    ecr.request_id,
-                    ecr,
-                    sp,
-                    prompt_text=prompt_text,
-                )
+                req_id, proc_input, sp = tokenized_queue.get(timeout=0.5)
+                engine.add_request(req_id, proc_input, sp)
             except queue.Empty:
                 if tok_done.is_set():
                     break
@@ -413,8 +396,7 @@ def main():
     tok_thread = threading.Thread(
         target=tokenizer_worker,
         args=(
-            engines[0].input_processor,
-            engines[0].get_supported_tasks(),
+            engines[0].renderer,
             request_items,
             tokenized_queue,
             tok_done,

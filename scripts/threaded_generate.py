@@ -40,6 +40,7 @@ from vllm_ft.util import (
     create_engine,
     make_arg_parser,
     print_throughput_results,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -52,24 +53,16 @@ apply_forward_context_monkey_patch()
 MAX_PULL_PER_STEP = 8
 
 
-def tokenizer_worker(
-    input_processor, supported_tasks, request_items, tokenized_queue, done_event
-):
-    """Background thread: tokenize SampleRequests into EngineCoreRequests.
+def tokenizer_worker(renderer, request_items, tokenized_queue, done_event):
+    """Background thread: tokenize SampleRequests via Renderer.
 
     request_items is a list of (SampleRequest, SamplingParams) tuples,
     allowing per-request sampling params (e.g. variable max_tokens for
     ShareGPT).
     """
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            str(i),
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=supported_tasks,
-        )
-        tokenized_queue.put((ecr, req.prompt, sp))
+        proc_input = render_request(renderer, req.prompt)
+        tokenized_queue.put((str(i), proc_input, sp))
     done_event.set()
 
 
@@ -88,13 +81,8 @@ def engine_worker(engine, device_index, tokenized_queue, tok_done, stats):
         # Pull a limited number of requests from the shared queue.
         for _ in range(MAX_PULL_PER_STEP):
             try:
-                ecr, prompt_text, sp = tokenized_queue.get_nowait()
-                engine.add_request(
-                    ecr.request_id,
-                    ecr,
-                    sp,
-                    prompt_text=prompt_text,
-                )
+                req_id, proc_input, sp = tokenized_queue.get_nowait()
+                engine.add_request(req_id, proc_input, sp)
             except queue.Empty:
                 break
 
@@ -111,13 +99,8 @@ def engine_worker(engine, device_index, tokenized_queue, tok_done, stats):
         else:
             # No work yet — block briefly for the tokenizer to catch up.
             try:
-                ecr, prompt_text, sp = tokenized_queue.get(timeout=0.5)
-                engine.add_request(
-                    ecr.request_id,
-                    ecr,
-                    sp,
-                    prompt_text=prompt_text,
-                )
+                req_id, proc_input, sp = tokenized_queue.get(timeout=0.5)
+                engine.add_request(req_id, proc_input, sp)
             except queue.Empty:
                 if tok_done.is_set():
                     break
@@ -155,8 +138,7 @@ def main():
     tok_thread = threading.Thread(
         target=tokenizer_worker,
         args=(
-            engines[0].input_processor,
-            engines[0].get_supported_tasks(),
+            engines[0].renderer,
             request_items,
             tokenized_queue,
             tok_done,

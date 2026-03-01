@@ -7,7 +7,7 @@
 
 import time
 
-from vllm_ft.util import make_arg_parser
+from vllm_ft.util import make_arg_parser, render_request
 
 
 def engine_generate_pipelined(engine, device_index):
@@ -54,17 +54,11 @@ def engine_worker(engine, device_index, request_items, result, barrier):
     import torch
 
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
 
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"gpu{device_index}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"gpu{device_index}_{i}", proc_input, sp)
 
     barrier.wait()
 

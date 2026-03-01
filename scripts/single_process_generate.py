@@ -30,7 +30,7 @@ from vllm import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.llm_engine import LLMEngine
 
-from vllm_ft.util import build_request_items, make_arg_parser
+from vllm_ft.util import build_request_items, make_arg_parser, render_request
 
 
 def main():
@@ -42,7 +42,7 @@ def main():
     args = parser.parse_args()
 
     # 1. Create engine configuration.
-    engine_args = EngineArgs(model=args.model, enforce_eager=True)
+    engine_args = EngineArgs(model=args.model, enforce_eager=True, seed=42)
 
     # 2. Create LLMEngine with multiprocessing explicitly disabled.
     #    - Uses InprocClient (direct calls) instead of SyncMPClient (ZMQ IPC)
@@ -62,10 +62,12 @@ def main():
     num_prompts = 0
 
     while True:
-        # 3. Add requests.  InputProcessor tokenizes the prompt text.
+        # 3. Add requests via Renderer API.
         prompts = [req.prompt for req, _ in request_items]
+        renderer = engine.renderer
         for i, prompt in enumerate(prompts * 100):
-            engine.add_request(str(i), prompt, sampling_params)
+            proc_input = render_request(renderer, prompt)
+            engine.add_request(str(i), proc_input, sampling_params)
 
         # 4. Step loop -- all in-process, single-threaded.
         #    Each step() call does:

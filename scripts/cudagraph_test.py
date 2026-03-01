@@ -22,6 +22,7 @@ from vllm_ft.util import (
     create_engine,
     make_arg_parser,
     print_throughput_results,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -43,16 +44,10 @@ def engine_generate(engine, device_index):
 def load_and_run(engine, device_index, request_items, prefix):
     """Load requests into engine and run."""
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"{prefix}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"{prefix}_{i}", proc_input, sp)
 
     t0 = time.time()
     outputs, steps = engine_generate(engine, device_index)
@@ -75,16 +70,10 @@ def load_and_run(engine, device_index, request_items, prefix):
 
 def threaded_worker(engine, device_index, request_items, prefix, result, barrier):
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"{prefix}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"{prefix}_{i}", proc_input, sp)
 
     barrier.wait()
 

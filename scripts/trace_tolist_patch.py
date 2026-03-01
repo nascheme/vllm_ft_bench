@@ -7,7 +7,7 @@
 #
 # Key finding: the 600-780ms per step is entirely in the copy-stream sync,
 # NOT in .tolist().  The tensor shape is (batch, 1) for non-spec-decode,
-# making .tolist() trivially fast (~0ms).  See GAP_MEASURE.md Phase 4.
+# making .tolist() trivially fast (~0ms).  See TIMING.md Phase 4.
 #
 # Two modes:
 #   Default (diagnostic):  Logs shapes, sync time, and tolist time per step.
@@ -44,6 +44,7 @@ from vllm_ft.util import (
     build_request_items,
     create_engine,
     make_arg_parser,
+    render_request,
 )
 
 apply_forward_context_monkey_patch()
@@ -383,16 +384,10 @@ def install_tolist_patch(engine):
 
 def run_traced(engine, device_index, request_items, prefix, max_steps):
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"{prefix}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"{prefix}_{i}", proc_input, sp)
 
     step_num = 0
     finished = {}
@@ -432,16 +427,10 @@ def threaded_worker(
     max_steps,
 ):
     torch.cuda.set_device(device_index)
-    input_processor = engine.input_processor
+    renderer = engine.renderer
     for i, (req, sp) in enumerate(request_items):
-        ecr = input_processor.process_inputs(
-            f"{prefix}_{i}",
-            req.prompt,
-            sp,
-            arrival_time=time.time(),
-            supported_tasks=engine.get_supported_tasks(),
-        )
-        engine.add_request(ecr.request_id, ecr, sp, prompt_text=req.prompt)
+        proc_input = render_request(renderer, req.prompt)
+        engine.add_request(f"{prefix}_{i}", proc_input, sp)
 
     barrier.wait()
 
