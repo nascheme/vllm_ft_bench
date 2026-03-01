@@ -18,7 +18,17 @@ from vllm_ft.util import (
 )
 
 
-def engine_worker(device_index, num_gpus, model, num_requests, result_queue):
+def engine_worker(
+    device_index,
+    num_gpus,
+    model,
+    num_requests,
+    result_queue,
+    dataset,
+    prompt_source,
+    input_len,
+    output_len,
+):
     """Subprocess: build data and run LLM.generate() — matches dp_generate.py."""
     import os
     import time
@@ -36,10 +46,10 @@ def engine_worker(device_index, num_gpus, model, num_requests, result_queue):
     worker_args = argparse.Namespace(
         model=model,
         num_requests=num_requests,
-        input_len=1024,
-        output_len=128,
-        prompt_source="random",
-        dataset=None,
+        input_len=input_len,
+        output_len=output_len,
+        prompt_source=prompt_source,
+        dataset=dataset,
     )
     all_request_items = build_request_items(worker_args, tokenizer)
 
@@ -95,7 +105,17 @@ def main():
     for gpu in range(args.num_gpus):
         p = Process(
             target=engine_worker,
-            args=(gpu, args.num_gpus, args.model, args.num_requests, result_queue),
+            args=(
+                gpu,
+                args.num_gpus,
+                args.model,
+                args.num_requests,
+                result_queue,
+                args.dataset,
+                args.prompt_source,
+                args.input_len,
+                args.output_len,
+            ),
         )
         p.start()
         procs.append(p)

@@ -176,6 +176,11 @@ def main():
         help="Tokenize and add ALL requests before starting engine steps "
         "(matches LLM.generate() batch behavior).",
     )
+    parser.add_argument(
+        "--cuda-graphs",
+        action="store_true",
+        help="Enable CUDA graph capture (CUDAGraphMode.FULL) in each engine.",
+    )
     args = parser.parse_args()
 
     tokenizer = get_tokenizer(args.model)
@@ -190,7 +195,11 @@ def main():
     engines = []
     for i in range(args.num_gpus):
         print(f"Creating engine on cuda:{i} ...")
-        engines.append(create_engine(engine_args, i, UsageContext.LLM_CLASS))
+        engines.append(
+            create_engine(
+                engine_args, i, UsageContext.LLM_CLASS, cuda_graphs=args.cuda_graphs
+            )
+        )
     print(f"All {args.num_gpus} engines created.")
 
     per_engine_queues = [
