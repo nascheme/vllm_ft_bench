@@ -131,7 +131,7 @@ slicing version (useful if spec-decode produces wide tensors, but a no-op
 for the common `(batch, 1)` shape).  Use `--steps N` to control how many
 steps are traced.  Corrected a measurement error in `trace_step_flow.py`
 that had misattributed copy-stream sync time to `.tolist()` — see
-GAP_MEASURE.md Phase 4.
+TIMING.md Phase 4.
 
 ---
 

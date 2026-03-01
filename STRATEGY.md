@@ -35,8 +35,18 @@ gap to `mp_static_generate.py` (`LLM.generate()` + `VLLM_ENABLE_V1_MULTIPROCESSI
 is not from threading — it reflects that the EngineCore event loop runs faster
 in a dedicated subprocess than sharing a process with the step loop. See
 `PERFORMANCE.md` for details.
-The short-term goal is to close that gap and understand the remaining
-bottlenecks well enough to address them.
+
+Additional findings from the CUDA pipeline investigation:
+- Each engine thread already gets its own dedicated CUDA stream (via vLLM's
+  `threading.local()`-based `current_stream()`) — no monkey-patching needed
+- Sub-batch splitting across streams hurts throughput (GPU matmul hardware
+  already parallelizes across the batch dimension)
+- Multi-stream gains (up to 1.9x) exist when each stream brings new work,
+  confirming the value of multi-engine-per-GPU architectures
+
+The batch throughput story is essentially complete — threading matches
+multi-process. The next phase is demonstrating threading's advantage in
+scenarios where multi-process can't compete (online serving, prefix routing).
 
 ## Why Threading Could Be Better Than Multi-Process
 
@@ -122,32 +132,46 @@ decisions, and a bigger payoff from zero-IPC observability.
 
 ## What to Try Next
 
+Batch throughput parity is achieved. The remaining directions focus on
+demonstrating threading's unique advantages and closing the last small gap.
+
+**Online serving benchmark (highest priority):**
+- Build an arrival simulator (Poisson arrivals at varying rates)
+- Measure throughput at a given P99 latency target — this is the metric
+  production systems optimize for, and it favors real-time routing
+- This is where threading's zero-cost engine observability should beat
+  multi-process round-robin
+
+**Prefix-aware routing (the differentiating feature):**
+- Implement a dispatcher that routes requests sharing a system prompt to the
+  engine that already has them prefix-cached
+- Measure KV cache hit rate improvement vs. round-robin routing
+- Trivial with threads (direct memory access to KV cache state), hard with
+  multi-process
+
 **Closing the ~3% gap to `mp_static`:**
-- Investigate why `VLLM_ENABLE_V1_MULTIPROCESSING=1` is ~10% faster than
-  `=0` even in separate processes — likely the EngineCore event loop getting
-  a dedicated subprocess; resolve thread-safety issues to try `=1` in-process
-- Profile `other (gap)` in the step-time breakdown to confirm it's the
-  in-process event-loop round-trip, not some other serialization point
+- Investigate `VLLM_ENABLE_V1_MULTIPROCESSING=1` in threaded mode — each
+  engine's EngineCore in its own subprocess while keeping thread-based
+  coordination; needs thread-safety fixes in vLLM's parallel state init
+- This is the only remaining measurable performance gap, and it exists
+  identically in multi-process (`mp_engine` vs `mp_static`)
 
 **Targeted IPC / latency patches:**
 - Identify serial deserialization bottlenecks (depickling engine responses) and
   parallelize with FTP threads — pays off most at 8+ GPUs
 - Profile the CPU phases between GPU kernel launches; any serial Python work
   there creates inter-kernel gaps that waste GPU compute time
-- Treat latency reduction as the primary metric: lower latency improves
-  usability *and* keeps the GPU busier by shrinking idle gaps between kernels
-
-**Online serving benchmark:**
-- Build an arrival simulator (Poisson arrivals at varying rates)
-- Measure throughput at a given P99 latency target — this is the metric
-  production systems optimize for, and it favors real-time routing
-
-**Prefix-aware routing:**
-- Implement a dispatcher that routes requests sharing a system prompt to the
-  same engine
-- Measure KV cache hit rate improvement vs. round-robin routing
 
 **TP>1 path (future):**
 - Requires thread-safe parallel state in vLLM (process groups, NCCL)
 - The scheduler and dispatch logic need no changes
 - Needs multi-GPU hardware with enough cards for TP groups (e.g., 4× A10)
+
+## What Has Been Ruled Out (Investigation Complete)
+
+- **CUDA stream sharing** — each thread already gets its own stream
+- **Sub-batch splitting** — hurts throughput, GPU already parallelizes batches
+- **CUDA driver lock contention** — threaded is faster than subprocess
+- **GIL contention** — no difference between GIL and free-threaded for engines
+- **Async copy pipeline failures** — pipeline works correctly, wait = forward pass
+- **`.tolist()` bottleneck** — tensor is `(batch, 1)`, conversion is instant

@@ -52,12 +52,17 @@ total step           22.74ms      31.57ms      17.81ms       1.39×
 ```
 
 The `execute_model` overhead is modest (1.22×). The dominant new cost is
-`other (gap)` — the unmeasured time between the four named components,
-representing vLLM's internal async event-loop round-trips. It nearly doubles
-for cuda:0 (+7.32ms) but is essentially unchanged for cuda:1 (0.39ms). This
-asymmetry tracks batch size: larger batches produce more Python work per step,
-extending the event-loop round-trip. The net throughput impact is small (~2%)
-because cuda:1 drives wall time and cuda:1 is not penalized.
+`other (gap)` — time not covered by the four named components.
+`threaded_gap_breakdown.py` (see also TIMING.md Phase 1) identified that
+this gap is primarily `sample_tokens()`: GPU synchronization via
+`_bookkeeping_sync()` (which calls `async_copy_ready_event.synchronize()` to
+wait for the GPU→CPU copy stream) plus minor contributions from
+`get_grammar_bitmask`, batch-queue management, and `_process_aborts_queue`.
+The gap nearly doubles for cuda:0 (+7.32ms) but is essentially unchanged for
+cuda:1 (0.39ms). This asymmetry tracks batch size: larger batches produce
+more GPU work before the copy stream can complete, extending the sync wait.
+The net throughput impact is small (~2%) because cuda:1 drives wall time and
+cuda:1 is not penalized.
 
 ---
 
@@ -69,8 +74,10 @@ because cuda:1 drives wall time and cuda:1 is not penalized.
 observed gap.
 
 ### Async scheduling / batch pipelining
-Enabling `async_scheduling=True` (pipelines CPU scheduling with GPU execution)
-does not change throughput. GPU execution time dominates regardless.
+`async_scheduling=True` is the **default** (it sets `max_concurrent_batches=2`,
+activating `step_with_batch_queue` instead of `step`). Toggling it off
+(`async_scheduling=False`) does not change throughput — GPU execution time
+dominates regardless.
 
 ### Batch formation / request preloading
 Preloading all requests before stepping (matching `LLM.generate()` behavior)
@@ -112,6 +119,22 @@ indistinguishable from zero with CUDA graphs. Earlier analysis overstated the
 threading penalty because it compared the threaded step-loop against
 `mp_static_generate.py`, which uses a different methodology on two axes
 simultaneously (`LLM.generate()` and `VLLM_ENABLE_V1_MULTIPROCESSING=1`).
+
+### CUDA stream sharing between engine threads
+Each engine thread already gets its own dedicated CUDA stream via vLLM's
+`current_stream()` (`vllm/utils/torch_utils.py`), which uses
+`threading.local()` to lazily create a new `torch.cuda.Stream()` per thread.
+Verified with `stream_diagnostic.py`: two engine threads showed different
+stream pointers, consistent across 100 steps, with no overlap. No
+monkey-patching needed. CUDA graph capture also uses the per-thread stream.
+
+### Sub-batch splitting across streams
+Phase D of `cuda_pipeline_bench.py` tested splitting a fixed batch across
+multiple CUDA streams sharing the same weights. Throughput degrades monotonically
+(1.00x → 0.31x at 8 splits) because the GPU's matmul hardware already
+parallelizes across the batch dimension internally. Multi-stream gains only
+exist when each stream brings genuinely new work (separate engines), not when
+redistributing a fixed workload.
 
 ---
 
