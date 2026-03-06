@@ -2,15 +2,18 @@
 
 This repo contains experiment scripts for running vLLM under free-threaded
 Python (CPython 3.14t, `--disable-gil`). The focus is on finding performance
-optimizations with multi-process setups, enabled by true Python thread
+optimizations with multi-threaded setups, enabled by true Python thread
 parallelism.
 
 ## Relationship to the vLLM free-threaded build
 
 Running vLLM on Python 3.14t requires changes to the vLLM source and build
-system. That build can be done with the `vllm-ft-build` repo.  We assume that
-build is already made and activated.  We can run `python` directly which will
-use the correct venv.
+system. That build can be done with the GitHub nascheme/vllm-ft-build repo.
+
+We assume that build is already ready.  We assume you can run `python` directly
+and it will use the correct venv.  Also note that some extension packages still
+re-enable the GIL.  So you should run with `PYTHON_GIL=0` to force it to stay
+disabled.
 
 ## Current Hardware
 
@@ -40,20 +43,23 @@ caused by threading itself.
 ## Quick Start
 
 ```bash
-# Add vllm_ft package to path
-export PYTHONPATH=`pwd`/src
+# Activate your "vllm" build
+$ source ~/src/vllm-ft-build/.venv/bin/activate
+
+# Install vllm_ft package
+$ python -m pip install -e .
 
 # Single GPU baseline
-python scripts/simple_generate.py
+$ python scripts/simple_generate.py
 
 # Multi-process baseline (2 GPUs, separate processes)
-python scripts/mp_generate.py
+$ python scripts/mp_generate.py
 
 # Threaded dual-engine (2 GPUs, one process)
-python scripts/threaded_static_generate.py --preload
+$ python scripts/threaded_static_generate.py --preload
 
 # Threaded + CUDA graphs (parity with equivalent multi-process)
-python scripts/threaded_pipelined_generate.py --cuda-graphs
+$ python scripts/threaded_pipelined_generate.py --cuda-graphs
 ```
 
 Common flags (all scripts):
