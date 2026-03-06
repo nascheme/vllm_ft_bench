@@ -20,9 +20,9 @@ pyproject.toml    Hatch build (package: vllm_ft)
 
 ## vLLM source
 
-The vllm source tree is at **`/home/nas/pkg/vllm/vllm/`**.  Always read
-files from this path when you need to inspect vllm internals — do not search
-`site-packages`, `.venv`, or other locations.
+The vllm source tree is likely found at `~/src/vllm/` or `~/pkg/vllm/`.
+Always read files from this path when you need to inspect vllm internals —
+do not search `site-packages`, `.venv`, or other locations.
 
 ### Async output pipeline (key classes)
 
