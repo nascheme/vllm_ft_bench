@@ -83,6 +83,15 @@ def make_arg_parser(
         default=DEFAULT_NUM_GPUS,
         help=f"Number of GPUs (default: {DEFAULT_NUM_GPUS}).",
     )
+    parser.add_argument(
+        "--cuda-graphs",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable CUDA graph capture (CUDAGraphMode.FULL). "
+            "Works without torch.compile. Reduces CUDA driver API calls per step."
+        ),
+    )
     return parser
 
 
@@ -141,8 +150,13 @@ def build_request_items(args, tokenizer):
       2. Random (--prompt-source random): fixed output len, ignore_eos.
       3. Hardcoded (--prompt-source hardcoded): 3 short prompts.
     """
+    from vllm.benchmarks.datasets import (
+        RandomDataset,
+        SampleRequest,
+        ShareGPTDataset,
+    )
+
     from vllm import SamplingParams
-    from vllm.benchmarks.datasets import RandomDataset, ShareGPTDataset, SampleRequest
 
     dataset_path = _resolve_dataset(args)
 
@@ -283,7 +297,11 @@ def apply_forward_context_monkey_patch():
 
 
 def create_engine(
-    engine_args, device_index, usage_context, multiprocess_mode=False, cuda_graphs=False
+    engine_args,
+    device_index,
+    usage_context,
+    multiprocess_mode=False,
+    cuda_graphs=False,
 ):
     """Create an LLMEngine pinned to a specific GPU.
 
@@ -449,4 +467,6 @@ def print_prompt_length_histogram(requests):
             continue
         bar = "#" * max(1, int(count / max_count * bar_width))
         hi_str = f"{hi:>5d}" if hi != float("inf") else "  inf"
-        print(f"  {lo:>5d} - {hi_str}: {count:5d} ({count / total * 100:5.1f}%) {bar}")
+        print(
+            f"  {lo:>5d} - {hi_str}: {count:5d} ({count / total * 100:5.1f}%) {bar}"
+        )

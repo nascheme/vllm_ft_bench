@@ -29,6 +29,7 @@ def worker(
     prompt_source,
     dataset,
     result_queue,
+    cuda_graphs=False,
 ):
     """Worker process: create one LLM on a single GPU, generate, report."""
     import argparse
@@ -37,8 +38,9 @@ def worker(
     # Isolate this process to a single GPU.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
 
-    from vllm import LLM
     from vllm.tokenizers import get_tokenizer
+
+    from vllm import LLM
     from vllm_ft.util import build_request_items
 
     # Build the same dataset in every worker (same seed -> same data),
@@ -63,9 +65,37 @@ def worker(
     prompts = [req.prompt for req, _ in my_request_items]
     sampling_params = [sp for _, sp in my_request_items]
 
+    if cuda_graphs:
+        # Patch EngineArgs.create_engine_config to enable CUDAGraphMode.FULL
+        # before LLM.__init__ triggers engine + GPU worker setup.  This mirrors
+        # what create_engine(cuda_graphs=True) does for the LLMEngine path.
+        from vllm.config import CUDAGraphMode
+
+        from vllm import EngineArgs
+
+        _orig_create_engine_config = EngineArgs.create_engine_config
+
+        def _patched_create_engine_config(self, usage_context=None):
+            cfg = _orig_create_engine_config(self, usage_context)
+            cfg.model_config.enforce_eager = False
+            cc = cfg.compilation_config
+            cc.cudagraph_mode = CUDAGraphMode.FULL
+            max_seqs = cfg.scheduler_config.max_num_seqs
+            max_size = min(max_seqs * 2, 512)
+            sizes = [i for i in [1, 2, 4] if i <= max_size]
+            if max_size >= 8:
+                sizes += list(range(8, min(max_size + 1, 256), 8))
+            if max_size >= 256:
+                sizes += list(range(256, max_size + 1, 16))
+            cc.cudagraph_capture_sizes = sizes
+            cc.max_cudagraph_capture_size = sizes[-1]
+            return cfg
+
+        EngineArgs.create_engine_config = _patched_create_engine_config
+
     llm = LLM(
         model=model,
-        enforce_eager=True,
+        enforce_eager=not cuda_graphs,
         gpu_memory_utilization=0.8,
     )
 
@@ -103,7 +133,8 @@ def main():
 
     print(
         f"Starting {args.num_gpus} workers, {args.num_requests} requests "
-        f"(input={args.input_len}, output={args.output_len}) ..."
+        f"(input={args.input_len}, output={args.output_len}, "
+        f"cuda_graphs={args.cuda_graphs}) ..."
     )
 
     wall_start = time.time()
@@ -122,6 +153,7 @@ def main():
                 args.prompt_source,
                 args.dataset,
                 result_queue,
+                args.cuda_graphs,
             ),
         )
         p.start()
