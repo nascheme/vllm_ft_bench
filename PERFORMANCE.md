@@ -226,6 +226,30 @@ try `PYTORCH_NO_CUDA_MEMORY_CACHING=1` to isolate allocator effects.
 
 ---
 
+## TP=2 Multi-Process Baseline (Llama-3.2-1B-Instruct)
+
+Tensor-parallel (TP=2) benchmarks comparing GIL-enabled Python, free-threaded
+Python, and free-threaded Python with threads instead of processes. All runs
+use `--cuda-graphs` with 500 requests.
+
+| Configuration | Script | Throughput | Inference Time |
+|---|---|---|---|
+| GIL-enabled Python (multi-process) | tp_generate.py | 13.40 req/s, 5226 tok/s | 37.3s |
+| Free-threaded Python (multi-process) | tp_generate.py | 13.32 req/s, 5193 tok/s | 37.5s |
+| Free-threaded Python (multi-thread) | threaded_tp_generate.py | 13.31 req/s, 5187 tok/s | 37.6s |
+
+Free-threading adds **little to no overhead** when vLLM's standard
+multi-process TP is used (0.6% difference, well within noise). When the
+multi-process layer is replaced with threads (eliminating IPC), the
+free-threaded setup matches multi-process performance — the threaded TP
+result (13.31 req/s) is within 0.7% of the GIL-enabled baseline (13.40 req/s).
+
+This confirms that for TP workloads, the free-threaded Python runtime is not a
+bottleneck: GPU execution dominates, and the threading/IPC choice is immaterial
+to throughput.
+
+---
+
 ## Profiling Setup
 
 The `samply` profiler has been used to get CPU-level insight into where time
