@@ -4,7 +4,8 @@ All scripts live in `scripts/`. They are standalone entrypoints run directly
 with Python 3.14t (free-threaded build). The shared utility package is
 `src/vllm_ft/util.py`.
 
-Hardware assumption: 2x RTX 2060 (6 GB each). All scripts use TP=1/PP=1.
+Hardware assumption: 2x RTX 2060 (6 GB each). Most scripts use TP=1/PP=1;
+the TP scripts (`tp_generate.py`, `threaded_tp_generate.py`) use TP=2.
 
 ---
 
@@ -75,6 +76,26 @@ difference from the streaming-vs-batch difference.
 Hybrid: thread-based coordination but each engine's GPU work runs in a
 subprocess (`multiprocess_mode=True`, ZMQ). Gets process-level GPU isolation
 with thread-level coordination convenience.
+
+---
+
+## Tensor-Parallel (TP) Scripts
+
+**`tp_generate.py`**
+Multi-process tensor-parallel baseline. Uses vLLM's built-in TP
+(`tensor_parallel_size=N`) to shard a single model across GPUs. One engine,
+one process per GPU via `MultiprocExecutor`. This is the reference that the
+threaded TP script aims to match.
+
+**`threaded_tp_generate.py`**
+Single-process threaded tensor-parallel benchmark. Replaces vLLM's
+`MultiprocExecutor` with `ThreadedTPExecutor` (from `vllm_ft.threaded_tp`),
+running TP workers as threads in one process. NCCL handles GPU communication;
+control plane uses direct Python object passing (zero-copy, no SHM IPC).
+Supports `--cuda-graphs` (FULL mode without torch.compile), `--preload`,
+`--profile` (torch.profiler trace), and includes per-step phase timing.
+Achieves ~13 req/s vs ~7 req/s for the multi-process baseline on
+Llama-3.2-1B-Instruct with TP=2.
 
 ---
 
@@ -180,6 +201,12 @@ pattern. Four phases:
 Key CLI flags: `--phase {A,B,C,D,D1,D2,D3,all}`, `--hidden-size`,
 `--num-layers`, `--batch-size`, `--vocab-size`, `--num-steps`,
 `--warmup-steps`, `--max-threads-per-gpu`, `--total-batch-size`.
+
+**`cuda_event_blocking_bench.py`**
+Microbenchmark investigating `torch.cuda.Event(blocking=True/False)` behavior
+during `event.synchronize()`. Measures CPU fraction (cpu_time / wall_time) to
+determine if the CPU spins (~1.0) or blocks (~0.0) while waiting. Sweeps
+configurable wait durations. Supports `--profile` for detailed tracing.
 
 **`stream_diagnostic.py`**
 Verifies that each vLLM engine thread gets its own dedicated CUDA stream.
