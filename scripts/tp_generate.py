@@ -22,10 +22,41 @@ def main():
     parser = make_arg_parser(
         "Tensor-parallel multi-GPU vLLM throughput benchmark.",
     )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        action="append",
+        default=None,
+        metavar="TEXT",
+        help="Custom prompt(s) to run. Repeatable. Overrides --prompt-source/dataset.",
+    )
+    parser.add_argument(
+        "--show-output",
+        action="store_true",
+        default=False,
+        help="Print prompt and generated text for each completed request.",
+    )
     args = parser.parse_args()
 
     tokenizer = get_tokenizer(args.model)
-    request_items = build_request_items(args, tokenizer)
+
+    if args.prompt:
+        from vllm import SamplingParams
+        from vllm.benchmarks.datasets import SampleRequest
+
+        sp = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=args.output_len)
+        request_items = []
+        for prompt_text in args.prompt:
+            token_ids = tokenizer.encode(prompt_text)
+            req = SampleRequest(
+                prompt=prompt_text,
+                prompt_len=len(token_ids),
+                expected_output_len=args.output_len,
+            )
+            request_items.append((req, sp))
+        print(f"Custom prompts ready: {len(request_items)} requests")
+    else:
+        request_items = build_request_items(args, tokenizer)
     prompts = [req.prompt for req, _ in request_items]
     sampling_params = [sp for _, sp in request_items]
 
@@ -90,6 +121,17 @@ def main():
     ]
     print_throughput_results(gen_elapsed, engine_stats)
     print(f"Inference time: {gen_elapsed:.1f}s")
+
+    if args.show_output:
+        print(f"\n{'=' * 70}")
+        print(f"Generated outputs ({len(outputs)} requests)")
+        print(f"{'=' * 70}")
+        for i, ro in enumerate(outputs):
+            prompt = ro.prompt or "(unknown)"
+            text = ro.outputs[0].text if ro.outputs else "(no output)"
+            print(f"\n--- Request {i} ---")
+            print(f"Prompt:  {prompt}")
+            print(f"Output:  {text}")
 
 
 if __name__ == "__main__":
