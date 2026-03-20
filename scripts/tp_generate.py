@@ -44,7 +44,7 @@ def main():
         from vllm import SamplingParams
         from vllm.benchmarks.datasets import SampleRequest
 
-        sp = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=args.output_len)
+        sp = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=args.output_len)
         request_items = []
         for prompt_text in args.prompt:
             token_ids = tokenizer.encode(prompt_text)

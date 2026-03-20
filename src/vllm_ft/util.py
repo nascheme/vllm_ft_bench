@@ -180,7 +180,7 @@ def build_request_items(args, tokenizer):
                 req,
                 SamplingParams(
                     n=1,
-                    temperature=1.0,
+                    temperature=0.7,
                     top_p=1.0,
                     max_tokens=req.expected_output_len,
                 ),
@@ -204,7 +204,7 @@ def build_request_items(args, tokenizer):
         )
         sp = SamplingParams(
             n=1,
-            temperature=1.0,
+            temperature=0.7,
             top_p=1.0,
             ignore_eos=True,
             max_tokens=args.output_len,
@@ -214,7 +214,7 @@ def build_request_items(args, tokenizer):
         return request_items
 
     # Hardcoded prompts.
-    sp = SamplingParams(temperature=0.8, top_p=0.95)
+    sp = SamplingParams(temperature=0.7, top_p=0.95)
     request_items = []
     for prompt_text in HARDCODED_PROMPTS:
         token_ids = tokenizer.encode(prompt_text)
