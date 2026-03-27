@@ -9,6 +9,13 @@ the TP scripts (`tp_generate.py`, `threaded_tp_generate.py`) use TP=2.
 
 ---
 
+## Profile Analysis Scripts
+
+**`profile_report.py`
+This script processes a Samply profile and generates text reports.  See
+`PROFILING.md` for more details.
+
+
 ## Baseline / Reference Scripts
 
 **`simple_generate.py`**

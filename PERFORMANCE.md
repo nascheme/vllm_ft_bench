@@ -31,8 +31,7 @@ but in separate processes — the apples-to-apples baseline for threading overhe
 Threaded + CUDA graphs achieves **parity with the equivalent multi-process
 configuration** (`mp_engine_generate.py`). The remaining ~3% gap to `mp_static`
 is not from threading — it exists identically between `mp_static` and
-`mp_engine` (both in separate processes) and is attributable to `LLM.generate()`
-internals and `VLLM_ENABLE_V1_MULTIPROCESSING=1`. See Open Questions.
+`mp_engine` (both running in separate processes with no threading involved).
 
 ### Step-time breakdown (p50, steady-state decode)
 
@@ -98,12 +97,7 @@ throughput to `LLM.generate()` (~11 req/s). The step loop itself adds no cost.
 multiprocess mode gives the same single-GPU throughput. However, a ~10%
 dual-GPU gap persists between `mp_static_generate.py` (23.54 req/s, V1_MP=1)
 and `mp_engine_generate.py` (21.29 req/s, V1_MP=0) even though both run in
-separate processes with no threading involved. The cause is almost certainly
-`VLLM_ENABLE_V1_MULTIPROCESSING=1`: when the EngineCore runs in a dedicated
-child subprocess, its asyncio event loop gets its own CPU and is never
-preempted by the step-loop caller. With `=0`, the event loop shares the
-process with the step loop, slowing the internal round-trips visible as
-`other (gap)` in the step-time table. See Open Questions.
+separate processes with no threading involved.
 
 ### GIL vs. free-threaded Python (for engine threads)
 Testing with both standard (GIL) and free-threaded (`--disable-gil`) builds
@@ -167,62 +161,6 @@ Note: CUDA graphs are benchmarked via `threaded_pipelined_generate.py
 --cuda-graphs` (which pipelines output processing separately from the GPU
 step) rather than `threaded_static_generate.py`, which does not have a
 `--cuda-graphs` flag.
-
----
-
-## Open Questions
-
-Threading overhead is now established as negligible (≤2% vs. equivalent
-multi-process). The open questions focus on what accounts for the ~10% gap
-between `mp_static` and the `create_engine` step-loop approach, and on
-longer-term architecture.
-
-### 1. Why is `LLM.generate()` + `VLLM_ENABLE_V1_MULTIPROCESSING=1` ~10% faster?
-
-`mp_static_generate.py` (23.54 req/s) vs. `mp_engine_generate.py` (21.29 req/s)
-both run in separate processes with no threading, but differ in methodology:
-`LLM.generate()` vs. `create_engine()` + step loop, and `V1_MP=1` vs. `=0`.
-
-Most likely cause: with `V1_MP=1`, the EngineCore asyncio event loop runs in
-a dedicated child subprocess and is never preempted by the calling process.
-With `V1_MP=0`, the event loop shares the process with the step loop, producing
-the `other (gap)` overhead visible in the step-time breakdown — 7.68ms per step
-even in single-GPU mode. With `V1_MP=1` this gap would likely shrink or
-disappear, recovering most of the 10% difference.
-
-**How to investigate:** Profile with `V1_MP=1` inside a threaded context once
-the thread-safety issues are resolved; measure whether `other (gap)` drops.
-Alternatively, run `threaded_step_breakdown.py` in a subprocess to isolate
-whether the gap is an in-process effect.
-
-### 2. Biased reference counting in free-threaded Python
-
-Free-threaded Python 3.14t uses *biased reference counting*: objects are
-assumed to be owned by one thread. When a thread other than the "owner" touches
-an object's refcount, it requires atomic operations and can cause cache-line
-contention. With threading overhead at ~2% overall this is likely a second-order
-effect, but it may account for part of that residual.
-
-**How to investigate:** Profile with `perf record` looking for cache-miss
-hotspots in refcount operations.
-
-### 3. CPU cache thrashing
-
-Two engine threads on different CPU cores competing for L3 cache. Each engine's
-working set (scheduler state, KV cache metadata, Python interpreter state)
-evicts the other's data, causing higher cache miss rates.
-
-**How to investigate:** Pin engine threads to specific CPU cores/NUMA nodes
-with `os.sched_setaffinity()` and compare.
-
-### 4. PyTorch allocator and internal state
-
-PyTorch's CUDA caching allocator is per-device but process-wide. Internal
-PyTorch state (autograd bookkeeping, cuDNN handle management) may also have
-subtle serialization points.
-
-**How to investigate:** `torch.cuda.memory_stats()` for allocator contention;
-try `PYTORCH_NO_CUDA_MEMORY_CACHING=1` to isolate allocator effects.
 
 ---
 
