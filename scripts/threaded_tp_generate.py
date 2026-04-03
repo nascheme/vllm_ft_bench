@@ -28,6 +28,8 @@ from vllm.tokenizers import get_tokenizer  # noqa: E402
 from vllm_ft.util import (  # noqa: E402
     apply_forward_context_monkey_patch,
     build_request_items,
+    generate_cudagraph_capture_sizes,
+    get_speculative_config,
     make_arg_parser,
     print_throughput_results,
     render_request,
@@ -333,6 +335,7 @@ def main():
         tensor_parallel_size=args.num_gpus,
         enforce_eager=True,  # avoid torch.compile (unsupported on free-threaded)
         gpu_memory_utilization=0.8,
+        speculative_config=get_speculative_config(args),
     )
 
     # Suppress noisy warnings during config creation.
@@ -353,12 +356,9 @@ def main():
         cc = vllm_config.compilation_config
         cc.cudagraph_mode = CUDAGraphMode.FULL
         max_seqs = vllm_config.scheduler_config.max_num_seqs
-        max_size = min(max_seqs * 2, 512)
-        sizes = [i for i in [1, 2, 4] if i <= max_size]
-        if max_size >= 8:
-            sizes += list(range(8, min(max_size + 1, 256), 8))
-        if max_size >= 256:
-            sizes += list(range(256, max_size + 1, 16))
+        sizes = generate_cudagraph_capture_sizes(
+            max_seqs, vllm_config.speculative_config
+        )
         cc.cudagraph_capture_sizes = sizes
         cc.max_cudagraph_capture_size = sizes[-1]
         print(f"CUDA graphs enabled (FULL mode, {len(sizes)} capture sizes)")

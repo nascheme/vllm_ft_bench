@@ -30,7 +30,12 @@ from vllm import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.llm_engine import LLMEngine
 
-from vllm_ft.util import build_request_items, make_arg_parser, render_request
+from vllm_ft.util import (
+    build_request_items,
+    get_speculative_config,
+    make_arg_parser,
+    render_request,
+)
 
 
 def main():
@@ -42,7 +47,12 @@ def main():
     args = parser.parse_args()
 
     # 1. Create engine configuration.
-    engine_args = EngineArgs(model=args.model, enforce_eager=True, seed=42)
+    engine_args = EngineArgs(
+        model=args.model,
+        enforce_eager=True,
+        seed=42,
+        speculative_config=get_speculative_config(args),
+    )
 
     # 2. Create LLMEngine with multiprocessing explicitly disabled.
     #    - Uses InprocClient (direct calls) instead of SyncMPClient (ZMQ IPC)

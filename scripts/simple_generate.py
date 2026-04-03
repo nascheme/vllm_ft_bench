@@ -2,7 +2,7 @@
 
 from vllm import LLM
 
-from vllm_ft.util import build_request_items, make_arg_parser
+from vllm_ft.util import build_request_items, get_speculative_config, make_arg_parser
 
 
 def run():
@@ -13,7 +13,11 @@ def run():
     )
     args = parser.parse_args()
 
-    llm = LLM(model=args.model, enforce_eager=True)
+    llm = LLM(
+        model=args.model,
+        enforce_eager=True,
+        speculative_config=get_speculative_config(args),
+    )
 
     request_items = build_request_items(args, llm.get_tokenizer())
     prompts = [req.prompt for req, _ in request_items]

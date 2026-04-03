@@ -38,6 +38,7 @@ from vllm_ft.util import (
     apply_forward_context_monkey_patch,
     build_request_items,
     create_engine,
+    get_speculative_config,
     make_arg_parser,
     print_throughput_results,
     render_request,
@@ -124,6 +125,7 @@ def main():
         enforce_eager=True,
         gpu_memory_utilization=0.8,
         async_scheduling=False,
+        speculative_config=get_speculative_config(args),
     )
     engines = []
     for i in range(args.num_gpus):

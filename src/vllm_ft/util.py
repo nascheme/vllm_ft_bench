@@ -92,7 +92,62 @@ def make_arg_parser(
             "Works without torch.compile. Reduces CUDA driver API calls per step."
         ),
     )
+    parser.add_argument(
+        "--ngram",
+        action="store_true",
+        default=False,
+        help="Enable ngram speculative decoding (exercises numba).",
+    )
+    parser.add_argument(
+        "--num-speculative-tokens",
+        type=int,
+        default=5,
+        help="Number of speculative tokens for ngram mode (default: 5).",
+    )
     return parser
+
+
+# ---------------------------------------------------------------------------
+# Speculative decoding config
+# ---------------------------------------------------------------------------
+
+
+def get_speculative_config(args):
+    """Return a speculative_config dict for EngineArgs, or None if disabled."""
+    if not getattr(args, "ngram", False):
+        return None
+    return {
+        "method": "ngram",
+        "num_speculative_tokens": args.num_speculative_tokens,
+    }
+
+
+def generate_cudagraph_capture_sizes(max_seqs, speculative_config=None):
+    """Generate CUDA graph capture sizes aligned to the decode query length.
+
+    With speculative decoding, each decode step processes
+    (1 + num_speculative_tokens) tokens per request, so all capture sizes
+    must be multiples of that query length.
+    """
+    query_len = 1
+    if speculative_config is not None:
+        query_len = 1 + speculative_config.num_speculative_tokens
+
+    max_size = min(max_seqs * 2, 512)
+    # Round max_size up to a multiple of query_len.
+    max_size = ((max_size + query_len - 1) // query_len) * query_len
+
+    if query_len == 1:
+        sizes = [i for i in [1, 2, 4] if i <= max_size]
+        if max_size >= 8:
+            sizes += list(range(8, min(max_size + 1, 256), 8))
+        if max_size >= 256:
+            sizes += list(range(256, max_size + 1, 16))
+    else:
+        # All sizes must be multiples of query_len.
+        sizes = list(range(query_len, max_size + 1, query_len))
+
+    return sizes
 
 
 # ---------------------------------------------------------------------------
@@ -350,12 +405,9 @@ def create_engine(
         cc.cudagraph_mode = CUDAGraphMode.FULL
         # Generate capture sizes (enforce_eager zeroed these out).
         max_seqs = vllm_config.scheduler_config.max_num_seqs
-        max_size = min(max_seqs * 2, 512)
-        sizes = [i for i in [1, 2, 4] if i <= max_size]
-        if max_size >= 8:
-            sizes += list(range(8, min(max_size + 1, 256), 8))
-        if max_size >= 256:
-            sizes += list(range(256, max_size + 1, 16))
+        sizes = generate_cudagraph_capture_sizes(
+            max_seqs, vllm_config.speculative_config
+        )
         cc.cudagraph_capture_sizes = sizes
         cc.max_cudagraph_capture_size = sizes[-1]
     executor_class = Executor.get_class(vllm_config)
