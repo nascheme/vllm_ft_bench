@@ -23,6 +23,7 @@ def engine_worker(
     num_gpus,
     model,
     num_requests,
+    torch_compile,
     result_queue,
     dataset,
     prompt_source,
@@ -60,10 +61,11 @@ def engine_worker(
     end_idx = start_idx + chunk if device_index < num_gpus - 1 else total
     my_request_items = all_request_items[start_idx:end_idx]
 
+    enforce_eager = torch_compile == "none"
     llm = LLM(
         model=model,
-        enforce_eager=True,
-        gpu_memory_utilization=0.8,
+        enforce_eager=enforce_eager,
+        gpu_memory_utilization=0.8 if enforce_eager else 0.7,
     )
 
     prompts = [req.prompt for req, _ in my_request_items]
@@ -100,7 +102,10 @@ def main():
 
     result_queue = Queue()
 
-    print(f"Spawning {args.num_gpus} engine subprocesses ...")
+    print(
+        f"Spawning {args.num_gpus} engine subprocesses "
+        f"(torch_compile={args.torch_compile}) ..."
+    )
     procs = []
     for gpu in range(args.num_gpus):
         p = Process(
@@ -110,6 +115,7 @@ def main():
                 args.num_gpus,
                 args.model,
                 args.num_requests,
+                args.torch_compile,
                 result_queue,
                 args.dataset,
                 args.prompt_source,
