@@ -14,10 +14,16 @@ def run():
     args = parser.parse_args()
 
     enforce_eager = args.torch_compile == "none"
+    kwargs = {}
+    if not enforce_eager:
+        # Lower gpu_memory_utilization to leave headroom for CUDA graph
+        # capture, which the default VLLM_COMPILE mode enables.
+        kwargs["gpu_memory_utilization"] = 0.7
     llm = LLM(
         model=args.model,
         enforce_eager=enforce_eager,
         speculative_config=get_speculative_config(args),
+        **kwargs,
     )
 
     request_items = build_request_items(args, llm.get_tokenizer())
