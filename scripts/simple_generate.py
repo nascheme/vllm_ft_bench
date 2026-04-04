@@ -13,9 +13,10 @@ def run():
     )
     args = parser.parse_args()
 
+    enforce_eager = args.torch_compile == "none"
     llm = LLM(
         model=args.model,
-        enforce_eager=True,
+        enforce_eager=enforce_eager,
         speculative_config=get_speculative_config(args),
     )
 

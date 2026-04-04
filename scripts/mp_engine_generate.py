@@ -26,6 +26,7 @@ def engine_worker(
     model,
     num_requests,
     cuda_graphs,
+    torch_compile,
     result_queue,
     dataset,
     prompt_source,
@@ -76,7 +77,11 @@ def engine_worker(
 
     # CUDA_VISIBLE_DEVICES remaps the physical card to cuda:0 in this process.
     engine = create_engine(
-        engine_args_obj, 0, UsageContext.LLM_CLASS, cuda_graphs=cuda_graphs
+        engine_args_obj,
+        0,
+        UsageContext.LLM_CLASS,
+        cuda_graphs=cuda_graphs,
+        torch_compile=torch_compile,
     )
 
     # Preload: tokenize and add all requests before stepping (matches
@@ -118,18 +123,13 @@ def main():
     parser = make_arg_parser(
         "Subprocess static-partition multi-GPU vLLM benchmark (create_engine + step loop).",
     )
-    parser.add_argument(
-        "--cuda-graphs",
-        action="store_true",
-        help="Enable CUDA graph capture (CUDAGraphMode.FULL) in each engine.",
-    )
     args = parser.parse_args()
 
     result_queue = Queue()
 
     print(
         f"Spawning {args.num_gpus} engine subprocesses "
-        f"(cuda_graphs={args.cuda_graphs}) ..."
+        f"(cuda_graphs={args.cuda_graphs}, torch_compile={args.torch_compile}) ..."
     )
     procs = []
     for gpu in range(args.num_gpus):
@@ -141,6 +141,7 @@ def main():
                 args.model,
                 args.num_requests,
                 args.cuda_graphs,
+                args.torch_compile,
                 result_queue,
                 args.dataset,
                 args.prompt_source,

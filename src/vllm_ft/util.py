@@ -93,6 +93,18 @@ def make_arg_parser(
         ),
     )
     parser.add_argument(
+        "--torch-compile",
+        type=str,
+        choices=["none", "stock", "vllm"],
+        default="none",
+        help=(
+            "Enable torch.compile. "
+            "'stock' = standard torch.compile (CompilationMode.STOCK_TORCH_COMPILE), "
+            "'vllm' = vLLM custom Inductor passes (CompilationMode.VLLM_COMPILE). "
+            "Default: none (enforce_eager=True)."
+        ),
+    )
+    parser.add_argument(
         "--ngram",
         action="store_true",
         default=False,
@@ -357,6 +369,7 @@ def create_engine(
     usage_context,
     multiprocess_mode=False,
     cuda_graphs=False,
+    torch_compile="none",
 ):
     """Create an LLMEngine pinned to a specific GPU.
 
@@ -373,6 +386,10 @@ def create_engine(
     which works without torch.compile. This reduces CUDA driver API calls
     from hundreds per step to one graph replay, mitigating driver lock
     contention in multi-threaded multi-GPU setups.
+
+    When torch_compile is "stock" or "vllm", clears enforce_eager and sets
+    the corresponding CompilationMode (STOCK_TORCH_COMPILE or VLLM_COMPILE).
+    This enables the full Dynamo -> Inductor -> Triton pipeline.
 
     When async_scheduling is enabled (in-process mode), also fixes the
     executor's async output thread to set the correct CUDA device.
@@ -391,6 +408,18 @@ def create_engine(
     vllm_config = engine_args.create_engine_config(usage_context)
     _seed_logger.setLevel(_seed_prev)
     vllm_config.device_config.device = torch.device(f"cuda:{device_index}")
+
+    # Enable torch.compile if requested.  Clear enforce_eager and set
+    # the compilation mode on the config.
+    if torch_compile != "none":
+        from vllm.config import CompilationMode
+
+        mode_map = {
+            "stock": CompilationMode.STOCK_TORCH_COMPILE,
+            "vllm": CompilationMode.VLLM_COMPILE,
+        }
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.compilation_config.mode = mode_map[torch_compile]
 
     # Re-enable CUDA graphs after enforce_eager disabled them.
     # FULL mode captures the entire forward pass as a single CUDA graph,
