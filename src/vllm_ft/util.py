@@ -399,6 +399,12 @@ def create_engine(
     from vllm.v1.engine.llm_engine import LLMEngine
     from vllm.v1.executor.abstract import Executor
 
+    # Set the CUDA device before anything else.  Inductor generates code
+    # with stream references tied to the current device at compile time
+    # (e.g. ``get_raw_stream(0)``).  Without this, engine 1 on cuda:1
+    # would compile or load cached code bound to cuda:0's stream.
+    torch.cuda.set_device(device_index)
+
     _ROPE_DICT.clear()
 
     # Suppress "The model's max seq len ... is larger than ..." seed warning.
