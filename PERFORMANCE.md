@@ -19,19 +19,28 @@ performance ceiling. `mp_engine_generate.py` uses the same `create_engine()` +
 manual step loop + `VLLM_ENABLE_V1_MULTIPROCESSING=0` as the threaded scripts,
 but in separate processes — the apples-to-apples baseline for threading overhead.
 
-| Configuration | Script | Throughput | vs. mp_static | vs. mp_engine |
-|---|---|---|---|---|
-| Single GPU | simple_generate.py | ~11.7 req/s | — | — |
-| **mp_static** (LLM.generate, V1_MP=1) | mp_static_generate.py | 23.54 req/s | 1.00× | — |
-| mp_engine, no CUDA graphs (step loop, V1_MP=0) | mp_engine_generate.py | 21.29 req/s | 0.91× | 1.00× |
-| mp_engine + CUDA graphs | mp_engine_generate.py --cuda-graphs | 22.72 req/s | 0.97× | 1.07× |
-| **Threaded, no CUDA graphs** (step loop, V1_MP=0) | threaded_static_generate.py --preload | 20.82 req/s | 0.88× | **0.98×** |
-| **Threaded + CUDA graphs** | threaded_pipelined_generate.py --cuda-graphs | 22.79 req/s | 0.97× | **1.00×** |
+### Eager and `--torch-compile vllm`
 
-Threaded + CUDA graphs achieves **parity with the equivalent multi-process
-configuration** (`mp_engine_generate.py`). The remaining ~3% gap to `mp_static`
-is not from threading — it exists identically between `mp_static` and
-`mp_engine` (both running in separate processes with no threading involved).
+| Configuration | Script | Throughput | vs. mp_static compiled | vs. mp_engine compiled |
+|---|---|---|---|---|
+| Single GPU | `simple_generate.py` | ~11.7 req/s | — | — |
+| mp_static, eager | `mp_static_generate.py` | 23.37 req/s | 0.82× | 0.92× |
+| **mp_static, compiled** | `mp_static_generate.py --torch-compile vllm` | **28.54 req/s** | 1.00× | 1.13× |
+| mp_engine, eager | `mp_engine_generate.py` | 23.86 req/s | 0.84× | 0.94× |
+| **mp_engine, compiled** | `mp_engine_generate.py --torch-compile vllm` | **25.35 req/s** | 0.89× | 1.00× |
+| threaded, eager | `threaded_static_generate.py --preload` | 22.71 req/s | 0.80× | 0.90× |
+| **threaded, compiled** | `threaded_static_generate.py --preload --torch-compile vllm` | **24.99 req/s** | 0.88× | **0.99×** |
+| mp_engine + CUDA graphs | `mp_engine_generate.py --cuda-graphs` | 22.72 req/s | 0.80× | 0.90× |
+| threaded + CUDA graphs | `threaded_pipelined_generate.py --cuda-graphs` | 22.79 req/s | 0.80× | 0.90× |
+
+The new top-line result is that **compiled threaded inference is near parity
+with the equivalent compiled multi-process step-loop baseline**:
+`threaded_static_generate.py --preload --torch-compile vllm` reaches
+24.99 req/s vs. 25.35 req/s for `mp_engine_generate.py --torch-compile vllm`
+(**98.6% of the multi-process baseline**).
+
+The practical throughput ceiling in these runs is now
+`mp_static_generate.py --torch-compile vllm` at **28.54 req/s**.
 
 ### Step-time breakdown (p50, steady-state decode)
 
@@ -108,11 +117,17 @@ GIL removal in the engine threads themselves.
 ### Threading itself
 When compared apples-to-apples against `mp_engine_generate.py` (same step-loop
 architecture, same `VLLM_ENABLE_V1_MULTIPROCESSING=0`, but separate OS
-processes), threading adds ≤2% overhead without CUDA graphs and is
-indistinguishable from zero with CUDA graphs. Earlier analysis overstated the
-threading penalty because it compared the threaded step-loop against
-`mp_static_generate.py`, which uses a different methodology on two axes
-simultaneously (`LLM.generate()` and `VLLM_ENABLE_V1_MULTIPROCESSING=1`).
+processes), threading adds a small overhead in eager mode and becomes nearly
+indistinguishable under `--torch-compile vllm`:
+
+- eager: 22.71 req/s threaded vs. 23.86 req/s multi-process (**95.2%**)
+- compiled: 24.99 req/s threaded vs. 25.35 req/s multi-process (**98.6%**)
+
+So the threading penalty is now about **4.8% in eager mode** and only
+**1.4% in compiled mode**. Earlier analysis overstated the threading penalty
+because it compared the threaded step-loop against `mp_static_generate.py`,
+which uses a different methodology on two axes simultaneously
+(`LLM.generate()` and `VLLM_ENABLE_V1_MULTIPROCESSING=1`).
 
 ### CUDA stream sharing between engine threads
 Each engine thread already gets its own dedicated CUDA stream via vLLM's
@@ -132,25 +147,65 @@ redistributing a fixed workload.
 
 ---
 
+## `torch.compile`
+
+Enabling `--torch-compile vllm` materially improves throughput in all tested
+configurations:
+
+```
+mp_static, eager:           23.37 req/s
+mp_static, compiled:        28.54 req/s  (+22.1%)
+
+mp_engine, eager:           23.86 req/s
+mp_engine, compiled:        25.35 req/s  (+6.2%)
+
+threaded, eager:            22.71 req/s
+threaded, compiled:         24.99 req/s  (+10.0%)
+```
+
+The most important apples-to-apples result is the step-loop comparison:
+`mp_engine_generate.py` improves from **23.86** to **25.35 req/s**, while
+`threaded_static_generate.py --preload` improves from **22.71** to
+**24.99 req/s**. Under compile, threaded execution reaches **98.6%** of the
+corresponding multi-process baseline by requests/s, and ~99% by total token
+throughput.
+
+The `threaded_static_generate.py` step profile also improves under compile,
+particularly on the slower `cuda:1` worker:
+
+- eager `cuda:1` p50 step time: **17.08 ms**
+- compiled `cuda:1` p50 step time: **13.39 ms**
+
+This indicates that compiled threaded inference is not merely functional after
+fixing the per-device compile cache path — it is materially faster than eager
+mode.
+
+### Caveat: variable-length generation affects req/s
+
+The ShareGPT runs use normal sampling with variable output lengths, so requests
+per second are not perfectly apples-to-apples across all scripts/runs. For
+example, the compiled `mp_static_generate.py` run produced fewer output tokens
+than the eager one, which makes the req/s uplift look somewhat larger than the
+per-token uplift. Total-token and output-token throughput should therefore be
+considered alongside req/s when comparing configurations.
+
 ## CUDA Graphs
 
-CUDA graphs provide a consistent ~7% throughput improvement in both threaded
+CUDA graphs still provide a useful eager-mode improvement in both threaded
 and multi-process configurations:
 
 ```
-mp_engine, no CUDA graphs:  21.29 req/s
-mp_engine + CUDA graphs:    22.72 req/s  (+6.7%)
+mp_engine, eager no CUDA graphs:  21.29 req/s
+mp_engine + CUDA graphs:          22.72 req/s  (+6.7%)
 
-Threaded, no CUDA graphs:   20.82 req/s
-Threaded + CUDA graphs:     22.79 req/s  (+9.5%)
+threaded, eager no CUDA graphs:   20.82 req/s
+threaded + CUDA graphs:           22.79 req/s  (+9.5%)
 ```
 
-The benefit is symmetric — CUDA graphs are not a threading-specific fix.
-They reduce step-time variance by collapsing per-step kernel launches into a
-single `cudaGraphLaunch`, which cuts the high-end tail (p90/p99 step times)
-and lets the two engines finish more closely in time. Since wall time is
-determined by the slower engine, tightening the tail improves throughput even
-when mean step time barely changes.
+However, the newer `--torch-compile vllm` results are stronger than the
+older eager-only CUDA graph numbers for this workload. CUDA graphs are thus
+best viewed as an eager-mode optimization, while `torch.compile` is now the
+main path for highest throughput.
 
 Enabling CUDA graphs in `create_engine(cuda_graphs=True)` uses `FULL` mode
 (captures the entire forward pass as a single graph), which works without
